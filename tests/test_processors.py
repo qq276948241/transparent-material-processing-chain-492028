@@ -1,0 +1,262 @@
+import os
+from unittest import mock
+import pytest
+
+from pilkit.lib import Image, ImageDraw, ImageColor
+from pilkit.processors import (Resize, ResizeToFill, ResizeToFit, SmartCrop,
+                               SmartResize, MakeOpaque, SetOpacity, ColorOverlay, Convert,
+                               GaussianBlur, ImageOverlay)
+from pilkit.processors.resize import Thumbnail
+from .utils import create_image, compare_images, get_image_file
+
+
+def test_smartcrop():
+    img = SmartCrop(100, 100).process(create_image())
+    assert img.size == (100, 100)
+
+
+def test_resizetofill():
+    img = ResizeToFill(100, 100).process(create_image())
+    assert img.size == (100, 100)
+
+
+def test_resizetofit():
+    # First create an image with aspect ratio 2:1...
+    img = Image.new('RGB', (200, 100))
+
+    # ...then resize it to fit within a 100x100 canvas.
+    img = ResizeToFit(100, 100).process(img)
+
+    # Assert that the image has maintained the aspect ratio.
+    assert img.size == (100, 50)
+
+
+def test_resize_rounding():
+    """
+    Regression test for matthewwithanm/pilkit#1
+    """
+
+    img = Image.new('RGB', (95, 95))
+    img = ResizeToFill(28, 28).process(img)
+    assert img.size == (28, 28)
+
+
+def test_resizetofit_mat():
+    img = Image.new('RGB', (200, 100))
+    img = ResizeToFit(100, 100, mat_color=0x000000).process(img)
+    assert img.size == (100, 100)
+
+
+def test_coloroverlay():
+    """
+    Test that the ColorOverlay processor
+    """
+    img = Image.new('RGB', (200, 100))
+    color = ImageColor.getrgb('#cc0000')
+    img = ColorOverlay(color, overlay_opacity=1.0).process(img)
+    assert img.getpixel((0,0)) == (204, 0, 0)
+
+def test_imageoverlay():
+    """
+    Test ImageOverlay processor
+    """
+    #test with RGBA mode background image
+    background_img_rgba = Image.open(get_image_file("reference.png")).convert("RGBA")
+    overlay_img_rgba = Image.open(get_image_file("image_with_transparency.png"))
+    result_1 = background_img_rgba
+    result_1 = ImageOverlay(overlay_img_rgba, (56,156)).process(result_1) #the overlay is completely inside the background image
+    result_1 = ImageOverlay(overlay_img_rgba, (-30,-10)).process(result_1) #the overlay top left corner is in the void
+    result_1 = ImageOverlay(overlay_img_rgba, (199,36)).process(result_1) #the overlay bottom right corner is in the void
+    expected_result_1 = Image.open(get_image_file("ImageOverlay_expected_result.png")).convert("RGBA") #This image have been generated with gimp
+    assert compare_images(result_1, expected_result_1) #overlay are positioned as expected 
+    assert result_1.mode == "RGBA" #the mode of the result is the same as the original 
+
+    #test with RGB mode background image
+    background_img_rgb = Image.open(get_image_file("reference.png")).convert("RGB")
+    result_2 = background_img_rgb
+    result_2 = ImageOverlay(overlay_img_rgba, (56,156)).process(result_2) #the overlay is completely inside the background image
+    result_2 = ImageOverlay(overlay_img_rgba, (-30,-10)).process(result_2) #the overlay top left corner is in the void
+    result_2 = ImageOverlay(overlay_img_rgba, (199,36)).process(result_2) #the overlay bottom right corner is in the void
+    expected_result_2 = Image.open(get_image_file("ImageOverlay_expected_result.png")).convert("RGB") #This image have been generated with gimp
+    assert compare_images(result_2, expected_result_2) #overlay are positioned as expected 
+    assert result_2.mode == "RGB" #the mode of the result is the same as the original
+
+
+def test_convert():
+    img = Image.new('RGBA', (200, 100))
+
+    img_RGBa = Convert("RGBa").process(img)
+    assert img_RGBa.mode == "RGBa"
+
+    img_RGBa_RGBA = Convert("RGBA").process(img)
+    assert img_RGBa_RGBA.mode == "RGBA"
+
+
+def test_resize_antialiasing():
+    """
+    Test that the Resize processor antialiases.
+
+    The Resize processor is used by all of the Resize* variants, so this should
+    cover all of resize processors. Basically, this is to test that it converts
+    to RGBA mode before resizing.
+
+    Related: jdriscoll/django-imagekit#192
+
+    """
+    # Create a palette image and draw a circle into it.
+    img = Image.new('P', (500, 500), 1)
+    img.putpalette([
+        0,   0,   0,
+        255, 255, 255,
+        0,   0,   255,
+    ])
+    d = ImageDraw.ImageDraw(img)
+    d.ellipse((100, 100, 400, 400), fill=2)
+
+    # Resize the image using the Resize processor
+    img = Resize(100, 100).process(img)
+
+    # Count the number of colors
+    color_count = len(list(filter(None, img.histogram())))
+
+    assert color_count > 2
+
+
+def test_upscale():
+    """
+    Test that the upscale argument works as expected.
+
+    """
+
+    img = Image.new('RGB', (100, 100))
+
+    for P in [Resize, ResizeToFit, ResizeToFill, SmartResize]:
+        img2 = P(500, 500, upscale=True).process(img)
+        assert img2.size == (500, 500)
+
+        img2 = P(500, 500, upscale=False).process(img)
+        assert img2.size == (100, 100)
+
+
+def test_should_raise_exception_if_anchor_is_passed_and_crop_is_set_to_false():
+    with pytest.raises(Exception, match=r"You can't specify an anchor point if crop is False."):
+        Thumbnail(height=200, width=200, upscale=False, crop=False, anchor='t')
+
+
+def test_should_set_crop_to_true_if_anchor_is_passed_without_crop():
+    thumb = Thumbnail(height=200, width=200, upscale=False, anchor='t')
+    assert thumb.crop
+
+
+def test_should_raise_exception_when_crop_is_passed_without_height_and_width():
+    img = Image.new('RGB', (100, 100))
+    with pytest.raises(Exception, match=r"You must provide both a width and height when cropping."):
+        Thumbnail(crop=True).process(img)
+
+
+@mock.patch('pilkit.processors.resize.SmartResize')
+def test_should_call_smartresize_when_crop_not_passed(my_mock):
+    img = Image.new('RGB', (100, 100))
+    Thumbnail(height=200, width=200, upscale=False).process(img)
+    assert my_mock.called
+
+
+@mock.patch('pilkit.processors.resize.SmartResize')
+def test_should_repass_upscale_option_true(my_mock):
+    img = Image.new('RGB', (100, 100))
+    Thumbnail(height=200, width=200, upscale=True).process(img)
+    my_mock.assert_called_once_with(width=200, upscale=True, height=200)
+
+
+@mock.patch('pilkit.processors.resize.SmartResize')
+def test_should_repass_upscale_option_false(my_mock):
+    img = Image.new('RGB', (100, 100))
+    Thumbnail(height=200, width=200, upscale=False).process(img)
+    my_mock.assert_called_once_with(width=200, upscale=False, height=200)
+
+
+@mock.patch('pilkit.processors.resize.ResizeToFill')
+def test_should_call_resizetofill_when_crop_and_ancho_is_passed(my_mock):
+    img = Image.new('RGB', (100, 100))
+    Thumbnail(height=200, width=200, anchor='fake').process(img)
+    assert my_mock.called
+
+@mock.patch('pilkit.processors.resize.ResizeToFit')
+def test_should_call_resizetofit_when_crop_is_not_passed(my_mock):
+    img = Image.new('RGB', (100, 100))
+    Thumbnail(height=200, width=200, crop=False).process(img)
+    assert my_mock.called
+
+def test_GaussianBlur_radius_3():
+    img = GaussianBlur(radius = 3).process(create_image())
+    img = img.crop((112,112,144,144))
+
+    expected_img = Image.open(get_image_file("GaussianBlur_radius_3.png"))
+    assert compare_images(img, expected_img)
+
+def test_GaussianBlur_radius_7():
+    img = GaussianBlur(radius=7).process(create_image())
+    img = img.crop((112, 112, 144, 144))
+
+    expected_img = Image.open(get_image_file("GaussianBlur_radius_7.png"))
+    assert compare_images(img, expected_img)
+
+def test_make_gifs_opaque():
+    dir = os.path.dirname(__file__)
+    path = os.path.join(dir, 'assets', 'cat.gif')
+    gif = Image.open(path)
+    MakeOpaque().process(gif)
+
+def test_setOpacity():
+    #test on RGB image
+    ref_1 = Image.open(get_image_file("reference.png")).convert("RGB")
+    nb_pixels = ref_1.width*ref_1.height
+    result_1 = SetOpacity(0).process(ref_1)
+    assert result_1.mode == "RGBA" #mode of the output is RGBA
+    expected_histogram_1 = [0]*256 #initialize an empty histogram
+    expected_histogram_1[0] = nb_pixels #all pixels at 0
+    r,g,b,a = result_1.split()
+    assert a.histogram() == expected_histogram_1 #opacity is 0 on every pixel
+
+    result_2 = SetOpacity(50).process(ref_1)
+    assert result_2.mode == "RGBA" #mode of the output is RGBA
+    expected_histogram_2 = [0]*256 #initialize an empty histogram
+    expected_histogram_2[50] = nb_pixels #all pixels at 50
+    r,g,b,a = result_2.split()
+    assert a.histogram() == expected_histogram_2 #opacity is 0 on every pixel
+
+    result_3 = SetOpacity(125).process(ref_1)
+    assert result_3.mode == "RGBA" #mode of the output is RGBA
+    expected_histogram_3 = [0]*256 #initialize an empty histogram
+    expected_histogram_3[125] = nb_pixels #all pixels at 125
+    r,g,b,a = result_3.split()
+    assert a.histogram() == expected_histogram_3 #opacity is 0 on every pixel
+
+    #test on RGBA image
+    ref_2 = Image.open(get_image_file("multiple_alpha_image.png")) #image 60x30px with following alpha values [0, 8, 32, 78, 147, 244] (300px for each values)
+    result_4 = SetOpacity(244).process(ref_2) #no modification
+    assert compare_images(result_4,ref_2)
+
+    result_5 = SetOpacity(100).process(ref_2) #no modification
+    expected_histogram_5 = [0]*256 #initialize an empty histogram
+    expected_histogram_5[0] = 300 #all px @0 stay @0
+    expected_histogram_5[3] = 300 #px @8 lower to @3
+    expected_histogram_5[13] = 300 #px @32 lower to @13
+    expected_histogram_5[31] = 300 #px @78 lower to @31
+    expected_histogram_5[60] = 300 #px @147 lower to @60
+    expected_histogram_5[100] = 300 #px @244 lower to @100 (as wanted)
+    r,g,b,a = result_5.split()
+    assert a.histogram() == expected_histogram_5
+
+    # test error
+    with pytest.raises(ValueError) :
+        SetOpacity(-1).process(ref2) #Value error
+    
+    with pytest.raises(ValueError) :
+        SetOpacity(256).process(ref2) #Value error
+    
+    with pytest.raises(TypeError) :
+        SetOpacity(0.1).process(ref2) #Type error
+    
+    with pytest.raises(TypeError) :
+        SetOpacity("255").process(ref2) #Type error
